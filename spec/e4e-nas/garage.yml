@@ -215,6 +215,11 @@ buckets:
         allowed_headers: ["*"]
         expose_headers: [ETag, Content-Length, Content-Type]
         max_age_seconds: 3600
+  # Trained model weights / checkpoints. No `keys:` entry grants it yet, so it
+  # is created-but-unreachable until a consumer key lists it below — grants are
+  # per bucket (the trust-boundary rule above), so the consumer decides the
+  # split: a shared read key + a per-producer write key, or one key per project.
+  - name: model-weights
 
 # Access keys. Only the NAME + bucket grants are declared here (git is truth);
 # the actual {access_key_id, secret_access_key} is NOT in the spec. The control
