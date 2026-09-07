@@ -215,10 +215,11 @@ buckets:
         allowed_headers: ["*"]
         expose_headers: [ETag, Content-Length, Content-Type]
         max_age_seconds: 3600
-  # Trained model weights / checkpoints. No `keys:` entry grants it yet, so it
-  # is created-but-unreachable until a consumer key lists it below — grants are
-  # per bucket (the trust-boundary rule above), so the consumer decides the
-  # split: a shared read key + a per-producer write key, or one key per project.
+  # Trained model weights / checkpoints, shared across projects that consume
+  # them. Grants are per bucket (the trust-boundary rule above), so consumers
+  # get read on this bucket without gaining anything on a project's internal
+  # artifacts. Nothing holds WRITE yet — whoever trains the models gets a
+  # separate write-granted key so a consumer key can never overwrite weights.
   - name: model-weights
 
 # Access keys. Only the NAME + bucket grants are declared here (git is truth);
@@ -228,14 +229,20 @@ buckets:
 # of truth and a lost NAS keys_dir is recoverable. See roles/synology_garage/
 # README.md "Key secrets" (#75).
 keys:
-  # Held by the fishsense-lite pipeline: read/write its own artifacts, and
-  # publish label-ready images into the hand-off bucket Label Studio reads.
+  # Held by the fishsense-lite pipeline: read/write its own artifacts, publish
+  # label-ready images into the hand-off bucket Label Studio reads, and read
+  # the shared trained model weights it runs inference with.
   - name: fishsense-lite
     buckets:
       - name: fishsense-lite
         permissions: [read, write]
       - name: labels-fishsense-lite
         permissions: [read, write]
+      # Read-only: the pipeline consumes trained weights at inference time but
+      # does not publish them, so whoever trains the models gets a separate
+      # write-granted key rather than widening this one.
+      - name: model-weights
+        permissions: [read]
   # Held by Label Studio (Heartex SaaS) in THIS project's Cloud Storage config:
   # reads the images to label, writes annotations back. Scoped to this one
   # project's label bucket — cannot see fishsense-lite internal artifacts or any
