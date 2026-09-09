@@ -45,7 +45,9 @@ nfs_idmap_domain: krg.local
 
 # The shares. Each entry -> one child dataset (<parent>/<name>, mounted at
 # <nfs_root>/<name>) + one /etc/exports.d line. Defined in host_vars; see the
-# example there for the schema (name / fsid / dataset_props / clients).
+# example there for the schema (name / fsid / dataset_props / clients, plus the
+# optional root_owner / root_group / root_mode that declare the export ROOT dir's
+# ownership + mode — omit them and the dataset root is left as ZFS made it).
 nfs_exports: []
 
 # --- ZFS auto-snapshots ----------------------------------------------------

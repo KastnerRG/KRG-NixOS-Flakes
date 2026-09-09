@@ -95,13 +95,14 @@ nfs_exports:
       - { host: "137.110.161.67", options: "rw,sync,no_subtree_check,no_root_squash" }   # waiter
       # - { host: "137.110.161.106", options: "rw,sync,no_subtree_check,no_root_squash" } # krg-prod
 
-  # Cold tier for waiter's krg /scratch (autotier — nix krg.scratch). autotier on
-  # waiter demotes least-popular krg scratch files NVMe -> HDD -> here, and reads
-  # them back on access. Per-LAB export (krg and e4e are independent labs sharing
-  # this infra): e4e gets its own export/NAS later, so keep this scoped to scratch-krg.
+  # Cold tier for waiter's krg /scratch (nix krg.scratch). The daily scratch-overflow
+  # job on waiter demotes least-recently-accessed krg scratch files here and leaves a
+  # symlink; users pull them back themselves with scratch-restore. Per-LAB export (krg
+  # and e4e are independent labs sharing this infra): e4e gets its own export/NAS
+  # later, so keep this scoped to scratch-krg.
   #
-  # no_root_squash: autotier runs as ROOT on waiter and moves arbitrary users' files
-  # onto this share preserving their owner/group — root_squash would map root ->
+  # no_root_squash: scratch-overflow runs as ROOT on waiter and moves arbitrary users'
+  # files onto this share preserving their owner/group — root_squash would map root ->
   # `nobody` and break ownership/perms (the lab-isolation gate). Scoped to waiter's IP.
   # recordsize=1M matches the bulk/sequential scratch profile; daily+ snapshots only.
   #
@@ -110,10 +111,23 @@ nfs_exports:
   #  out-of-band after confirming it's empty: `zfs destroy rpool/nfs/bulk` — NOT here.)
   - name: scratch-krg
     fsid: 12
+    # Export-root perms MIRROR the lab gate on waiter's /scratch/krg (nix krg.scratch
+    # sets 3770 root:<lab group>), minus write. scratch-restore runs as the USER and
+    # reads the archived copy through this directory, so lab members need traverse
+    # (--x) here or every restore fails "archive target missing ... is NFS mounted?"
+    # with the data intact underneath (the state this fixes: it was root-only 0700).
+    # 0710, not 0770/0755: members traverse to their own 0700 subtree, nobody can list
+    # the top level (it's a roster of usernames), and only the root-run overflow job
+    # creates entries here. Group is the NUMERIC gid of KRG\Kastner Research Group —
+    # fabricant isn't domain-joined, and the id is algorithmic from the AD SID, so it
+    # is the same number every host computes (`getent group` on waiter to confirm).
+    root_owner: "0"
+    root_group: "751001121"
+    root_mode: "0710"
     dataset_props:
       recordsize: "1M"
       "com.sun:auto-snapshot": "true"
       "com.sun:auto-snapshot:frequent": "false"
       "com.sun:auto-snapshot:hourly": "false"
     clients:
-      - { host: "137.110.161.67", options: "rw,sync,no_subtree_check,no_root_squash" }   # waiter (autotier cold tier)
+      - { host: "137.110.161.67", options: "rw,sync,no_subtree_check,no_root_squash" }   # waiter (scratch cold tier)

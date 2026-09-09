@@ -97,6 +97,14 @@ storage, a user runs **`scratch-restore <path>`** (or a directory) — self-serv
 admin. It's **fail-closed**: if the cold NFS area is down the unit won't even start
 (`RequiresMountsFor`), and a local file is *never* unlinked until its NFS copy verifies.
 
+**The cold export root's mode is load-bearing.** Restore runs as the *user*, so the
+lab needs traverse (`--x`) on `/srv/scratch-cold/<lab>` — the overflow job runs as root
+and mirrors each per-user directory below it, but never touches that top level. It is
+declared on the server (ansible `nfs_server`, `root_owner`/`root_group`/`root_mode` on
+the share — `0710 root:<lab gid>` for `scratch-krg`): traverse for the lab, no listing
+of the username roster, no writes. Left as ZFS made it, every restore fails and the
+data looks lost when it is only unreadable.
+
 ---
 
 ## Decisions & rationale
