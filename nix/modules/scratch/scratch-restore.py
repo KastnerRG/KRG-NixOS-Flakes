@@ -144,11 +144,29 @@ def restore_one(link, scratch_roots, cold_roots, pairs, keep_cold, verbose):
                 f"(expected {expected}) — not an archived scratch file"
             )
             return False
-    if not os.path.isfile(target):
-        log(f"skip {link}: archive target missing or not a file ({target}) — is NFS mounted?")
+    # stat() rather than os.path.isfile(): isfile() swallows the errno, so an
+    # UNREADABLE archive (EACCES anywhere along the cold path) reported as "missing",
+    # which sends people hunting for lost data that is sitting there intact. Keep the
+    # two causes apart — they have completely different fixes.
+    try:
+        tst = os.stat(target)
+    except PermissionError as e:
+        log(
+            f"skip {link}: cannot read the archived copy ({target}): {e.strerror}. "
+            f"Your data is intact — the cold area is denying you access. Ask an admin "
+            f"to check the export root's ownership/mode (ansible nfs_server "
+            f"root_owner/root_group/root_mode)."
+        )
         return False
-
-    tst = os.stat(target)
+    except FileNotFoundError:
+        log(f"skip {link}: archive target missing ({target}) — is NFS mounted?")
+        return False
+    except OSError as e:
+        log(f"skip {link}: cannot stat archive target ({target}): {e.strerror}")
+        return False
+    if not stat.S_ISREG(tst.st_mode):
+        log(f"skip {link}: archive target is not a regular file ({target})")
+        return False
     part = tmp_sibling(link, "sr")
     try:
         if os.path.lexists(part):

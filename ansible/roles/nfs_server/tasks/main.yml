@@ -56,6 +56,29 @@
   loop_control:
     label: "{{ nfs_parent_dataset }}/{{ item.name }}"
 
+# --- Export-root ownership/mode --------------------------------------------
+# `zfs create` leaves a share's mountpoint dir however the pool left it (root:root,
+# and scratch-krg came out 0700 on this host) — nothing DECLARED it, so it was drift,
+# and this top-level mode is load-bearing on the CLIENT side. A user restoring an
+# overflowed /scratch file (scratch-restore, which runs AS THE USER) reads the cold
+# copy THROUGH this directory: a root-only export root makes every self-service
+# restore fail with "archive target missing ... is NFS mounted?" while the data sits
+# there intact. Declare it per share; omit all three keys to leave a share's root
+# alone. owner/group take a NUMERIC id — fabricant isn't domain-joined so AD groups
+# don't resolve by name here, and the ids are algorithmic from the SID (identical
+# fleet-wide), so a number is stable, not a guess.
+- name: Set export-root ownership/mode
+  ansible.builtin.file:
+    path: "{{ nfs_root }}/{{ item.name }}"
+    state: directory
+    owner: "{{ item.root_owner | default(omit) }}"
+    group: "{{ item.root_group | default(omit) }}"
+    mode: "{{ item.root_mode | default(omit) }}"
+  loop: "{{ nfs_exports }}"
+  loop_control:
+    label: "{{ nfs_root }}/{{ item.name }}"
+  when: (item.root_owner is defined) or (item.root_group is defined) or (item.root_mode is defined)
+
 # --- ZFS auto-snapshots ----------------------------------------------------
 # Make the com.sun:auto-snapshot property the shares carry actually DO something:
 # Proxmox/Debian has no NixOS services.zfs.autoSnapshot, so without these timers the
