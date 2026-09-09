@@ -74,15 +74,18 @@ NVMe.
 ### Overflow to NFS (the only custom code, and it's *out* of the read path)
 
 The daily `scratch-overflow` timer ([`scratch-overflow.py`](../nix/modules/scratch/scratch-overflow.py))
-demotes files to the cold NFS area on fabricant for **two** reasons, both keyed on
-last-access time (`relatime`):
+demotes files to the cold NFS area on fabricant for **two** reasons, both keyed on last
+use — **`max(atime, mtime, ctime)`**, not atime alone (see `last_use()`; atime is
+preserved by common copy tools, so on its own it dates the data's *previous* home rather
+than its time here):
 
-- **TTL sweep (every run):** any file **not accessed in 6 months** (`maxIdleDays = 180`)
+- **TTL sweep (every run):** any file **untouched for 6 months** (`maxIdleDays = 180`)
   is demoted regardless of how full the pool is — automatic GC of genuinely-abandoned
-  data. Because it's keyed on *access*, an actively-read dataset is **never** evicted by
-  this, no matter how old it is.
+  data. Because it's keyed on *use*, an actively-read dataset is **never** evicted by
+  this, no matter how old it is, and a freshly-staged one gets its full 6 months even if
+  it arrived carrying ancient timestamps.
 - **Capacity sweep (when full):** when `scratchpool` is past **85%**, the
-  least-recently-accessed files (skipping anything touched in the last **14 days**) are
+  least-recently-used files (skipping anything touched in the last **14 days**) are
   demoted, coldest first, until the pool drops below **75%**.
 
 `/scratch` has ~29 TiB and current use is a couple of TB, so the *capacity* sweep rarely
@@ -113,7 +116,8 @@ data looks lost when it is only unreadable.
 |---|---|
 | **Striped special vdev** (not mirrored) | Matches the data vdev's no-redundancy (so `zpool create` needs no `-f`), same regenerable bet. Trade-off: losing **any** NVMe `special` partition loses the pool → regenerate. (Mirroring it was the safer alternative; striping was the chosen call for max metadata space + consistency.) |
 | **Snapshots OFF on `scratch-krg`** | Regenerable data, **and** snapshots would pin the blocks the overflow job frees when it demotes to NFS — defeating capacity relief. The cold copies on fabricant NFS *are* snapshotted, so archived data keeps accidental-delete protection. |
-| **`relatime` on the scratch dataset** | The overflow mover needs last-*access* to pick cold files. `atime=off` (pool default) would hide it; `mtime` would wrongly treat an actively-read-but-unmodified shard as cold. `relatime` is the low-overhead middle. |
+| **`relatime` on the scratch dataset** | The overflow mover needs last-*access* to pick cold files. `atime=off` (pool default) would hide it; `mtime` alone would wrongly treat an actively-read-but-unmodified shard as cold. `relatime` is the low-overhead middle. |
+| **Idle = `max(atime, mtime, ctime)`, not atime alone** | atime **travels with the data**: `cp -a`, `rsync --atimes`, `tar --atime-preserve` and `zfs send/recv` all carry the source machine's atime, so a dataset staged onto scratch yesterday can present as years idle and get TTL-archived the first night. `ctime` can't be set by userspace, so it bounds how long a file can really have been sitting here untouched. (This is not hypothetical: 218k of the first 248k demotions were driven by atimes older than the pool's own creation date.) |
 | **Overflow tooling in Python** (not Rust/shell) | Correctness-critical (it deletes local data after copying), so it needs real error handling — but it must stay **inspectable and maintainable by the researcher-admins**, with no compile step or new toolchain in a Nix+shell repo. Small, stdlib-only, fail-closed, unit-tested. (Rust was considered; rejected on bus-factor + the autotier lesson of an opaque tool nobody could fix.) |
 | **ARC cap (96 GiB) + earlyoom** | Mixed GPU/CPU/FPGA jobs share one box and one finite cache; the cap stops ARC starving a RAM-hungry job, earlyoom handles real pressure gracefully. 96 GiB ≈ 25% of waiter's 377 GiB (ZFS default ~50% is too much to hand a shared ML box); the ~5.6 TiB L2ARC sits under it, adding only ~0.4 GB of ARC headers at the 1M recordsize. Tune with `arcstat`. |
 | **smartd enabled** | The striped scratchpool has **no redundancy**, so advance warning of a failing disk (esp. the historically flaky `sdb`) matters. No MTA here → escalate via `wall` + journal; pool-level state still goes to Prometheus via the zpool-health textfile collector. |

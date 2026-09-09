@@ -2,13 +2,14 @@
 
 Greenfield scratch design (docs/scratch-greenfield.md): /scratch lives on a striped
 HDD pool fronted by NVMe ARC/L2ARC, so ZFS handles hot/cold for READS by itself.
-This job moves the least-recently-accessed files to a cold NFS area for two reasons,
-both keyed on last access: a TTL sweep (--max-idle-days) demotes anything not accessed
-in that long, every run, regardless of fullness (GC of abandoned data); and a capacity
-sweep demotes the coldest files when the pool fills past --high percent, until it drops
-below --low. Each demoted file is replaced with a symlink to its NFS copy (the path
-keeps working, reads just go over the network); a self-service `scratch-restore` pulls
-a file back to fast local storage.
+This job moves the least-recently-used files to a cold NFS area for two reasons, both
+keyed on last use — max(atime, mtime, ctime), NOT atime alone; see last_use(), a
+copied-in atime is not evidence the data is idle HERE: a TTL sweep (--max-idle-days)
+demotes anything untouched that long, every run, regardless of fullness (GC of
+abandoned data); and a capacity sweep demotes the coldest files when the pool fills
+past --high percent, until it drops below --low. Each demoted file is replaced with a
+symlink to its NFS copy (the path keeps working, reads just go over the network); a
+self-service `scratch-restore` pulls a file back to fast local storage.
 
 FAIL-CLOSED BY CONSTRUCTION — this is the whole point of writing it carefully:
 a local file is only ever unlinked AFTER its NFS copy is fully written, fsynced,
@@ -224,14 +225,35 @@ def makedirs_mirror(scratch, cold, rel):
             pass
 
 
-def gather_candidates(scratch, min_atime, skip_dir_prefixes, skip_exact):
-    """Regular, non-symlink files under scratch not accessed since min_atime.
+def last_use(st):
+    """When this file was last used ON THIS POOL — max(atime, mtime, ctime).
+
+    atime alone is NOT that, because atime travels with the data. Anything staged in
+    with timestamps preserved (`cp -a`, `rsync --atimes`, `tar --atime-preserve`, a
+    zfs send/recv migration) arrives carrying the atime it had on the machine it came
+    from, so a dataset copied onto /scratch yesterday can present as years idle and
+    the TTL sweep archives it the very first night — which is exactly what happened to
+    68k files of a just-staged dataset here (manifest atimes predating the pool's own
+    creation date). ctime is the guard: userspace cannot set it, the kernel stamps it
+    when the file is created/written/chowned on THIS filesystem, so it bounds how long
+    the file can possibly have been sitting here untouched. mtime is folded in for the
+    same reason — a file written but never read back is not abandoned.
+
+    Erring late is the right direction: the cost of a too-late demotion is some HDD
+    space on a pool that is 16% full; the cost of a too-early one is a researcher's
+    live dataset behind an NFS symlink.
+    """
+    return max(st.st_atime, st.st_mtime, st.st_ctime)
+
+
+def gather_candidates(scratch, cutoff, skip_dir_prefixes, skip_exact):
+    """Regular, non-symlink files under scratch not used (see last_use) since cutoff.
 
     `skip_dir_prefixes` are directory paths (each ending in os.sep) whose subtrees are
     excluded; `skip_exact` are individual file paths excluded by exact match (so e.g.
     the breadcrumb note isn't a prefix that also hides "WHERE-IS-MY-DATA.txt.bak").
 
-    Builds one in-memory list of (atime, size, path) and sorts it. That's bounded in
+    Builds one in-memory list of (last_use, size, path) and sorts it. That's bounded in
     practice: sharding is the data-layout standard here (a few large shards, not
     millions of tiny files — see docs/scratch-greenfield.md), the tuples are light
     (~tens of MB even at a million files), and the sweep runs Nice=10 / idle I/O once
@@ -255,10 +277,11 @@ def gather_candidates(scratch, min_atime, skip_dir_prefixes, skip_exact):
                 continue
             if st.st_size == 0:
                 continue
-            if st.st_atime > min_atime:  # recently accessed -> too hot to move
+            lu = last_use(st)
+            if lu > cutoff:  # recently used -> too hot to move
                 continue
-            cands.append((st.st_atime, st.st_size, p))
-    # coldest first; for equal atime, bigger first (frees space in fewer moves)
+            cands.append((lu, st.st_size, p))
+    # coldest first; for equal last-use, bigger first (frees space in fewer moves)
     cands.sort(key=lambda t: (t[0], -t[1]))
     return cands
 
@@ -388,6 +411,9 @@ def archive_one(path, scratch, cold, manifest_fp, dry_run, reason="capacity"):
                 "size": size,
                 "sha256": src_sha,
                 "atime": int(st.st_atime),
+                # what the sweep actually judged it on (see last_use) — differs from
+                # atime whenever the file was staged in with preserved timestamps
+                "last_use": int(last_use(st)),
             }
         )
         + "\n"
@@ -399,7 +425,7 @@ def archive_one(path, scratch, cold, manifest_fp, dry_run, reason="capacity"):
 
 NOTE_TEXT = """\
 Some files under this scratch directory have been moved to network storage (NFS):
-either you had not read them in a long time, or they were the coldest files when
+either they had not been touched in a long time, or they were the coldest files when
 scratch filled up and space had to be freed.
 
 A moved file now appears as a SYMLINK pointing into {cold}.
@@ -428,13 +454,14 @@ def main():
         "--min-age-days",
         type=float,
         default=14.0,
-        help="never move a file accessed within this many days (capacity sweep floor)",
+        help="never move a file used within this many days (capacity sweep floor); "
+        "use = max(atime, mtime, ctime)",
     )
     ap.add_argument(
         "--max-idle-days",
         type=float,
         default=0.0,
-        help="TTL sweep: move ANY file not accessed in this many days, "
+        help="TTL sweep: move ANY file not used in this many days, "
         "regardless of pool fullness. 0 = disabled.",
     )
     ap.add_argument("--zpool", default="zpool", help="zpool binary (PATH by default)")
@@ -470,10 +497,10 @@ def main():
     skip_dir_prefixes = {state_dir + os.sep}
     skip_exact = {os.path.join(args.scratch, NOTE_NAME)}
     now = time.time()
-    min_atime = now - args.min_age_days * 86400.0
-    cands = gather_candidates(args.scratch, min_atime, skip_dir_prefixes, skip_exact)
+    cutoff = now - args.min_age_days * 86400.0
+    cands = gather_candidates(args.scratch, cutoff, skip_dir_prefixes, skip_exact)
     if not cands:
-        log("no eligible files (all accessed too recently or already archived)")
+        log("no eligible files (all used too recently or already archived)")
         return 0
 
     # Split: TTL = idle past max-idle-days (move unconditionally); the rest are only
@@ -493,7 +520,7 @@ def main():
         # --- TTL pass: unconditional, runs even when the pool is nowhere near full ---
         if ttl_list:
             log(f"TTL sweep: {len(ttl_list)} file(s) idle > {args.max_idle_days}d")
-            for _atime, _size, path in ttl_list:
+            for _lu, _size, path in ttl_list:
                 got = archive_one(
                     path, args.scratch, args.cold, manifest_fp, args.dry_run, reason="ttl"
                 )
@@ -518,7 +545,7 @@ def main():
                 f"to reach {args.low}%"
             )
             cap_freed = 0
-            for _atime, _size, path in cap_list:
+            for _lu, _size, path in cap_list:
                 if cap_freed >= to_free:
                     break
                 got = archive_one(
