@@ -1,10 +1,11 @@
 name: Python unit tests
 
-# Unit tests for the control-side Python: the synology_* DSM apply_*.py helpers and the
-# drift_detector. Pure stdlib + pytest (+ pyyaml for the detector) — no DSM/NAS needed, so
-# plain setup-python (not nix) keeps this fast. Gates main + PRs like the nix build
-# (build.yml). Enforcement (required status check) is a branch-protection setting on
-# KastnerRG/krg-infra — configure it there so a red run blocks merge.
+# Unit tests for the control-side Python: the synology_* DSM apply_*.py helpers, the
+# drift_detector, and the /scratch overflow selector. Pure stdlib + pytest (+ pyyaml for
+# the detector) — no DSM/NAS/ZFS needed, so plain setup-python (not nix) keeps this fast.
+# Gates main + PRs like the nix build (build.yml). Enforcement (required status check)
+# is a branch-protection setting on KastnerRG/krg-infra — configure it there so a red
+# run blocks merge.
 on:
   push:
     branches: [main]
@@ -14,7 +15,7 @@ on:
 
 jobs:
   pytest:
-    name: pytest (python helpers + drift detector)
+    name: pytest (python helpers + drift detector + scratch)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -29,4 +30,4 @@ jobs:
         run: pip install pytest pyyaml
 
       - name: Run unit tests
-        run: pytest ansible/ drift/ -q
+        run: pytest ansible/ drift/ nix/modules/scratch/ -q

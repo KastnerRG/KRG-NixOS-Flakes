@@ -15,7 +15,7 @@
 #
 # CAPACITY OVERFLOW (the only mover, and it's OUT of the read hot path): when the
 # pool fills past a high-water mark, the per-lab `overflow` job (scratch-overflow,
-# a daily systemd timer) demotes the least-recently-accessed files to a cold NFS
+# a daily systemd timer) demotes the least-recently-used files to a cold NFS
 # area on fabricant and replaces each with a SYMLINK to the NFS copy — so the path
 # still works (reads just go over the network) and `scratch-restore` pulls a file
 # back to fast storage on demand. It is FAIL-CLOSED: a local file is unlinked only
@@ -230,17 +230,20 @@ with lib; let
       minAgeDays = mkOption {
         type = types.ints.unsigned;
         default = 14;
-        description = "Capacity-sweep floor: never demote a file accessed within this many days (keep the working set local).";
+        description = "Capacity-sweep floor: never demote a file used within this many days (keep the working set local).";
       };
       maxIdleDays = mkOption {
         type = types.ints.unsigned;
         default = 0;
         example = 180;
         description = ''
-          TTL sweep: demote ANY file not ACCESSED in this many days, regardless of pool
+          TTL sweep: demote ANY file not USED in this many days, regardless of pool
           fullness — the automatic GC for genuinely-abandoned data (runs every sweep,
-          not just when full). Keyed on last-access (relatime), so an actively-read file
-          is never evicted. 0 = disabled (capacity sweep only). Must exceed minAgeDays.
+          not just when full). "Used" is max(atime, mtime, ctime), so an actively-read
+          file is never evicted AND data staged in with preserved timestamps isn't
+          judged on the atime it arrived carrying (see last_use in scratch-overflow.py:
+          atime alone once archived a freshly-copied dataset on its first night).
+          0 = disabled (capacity sweep only). Must exceed minAgeDays.
         '';
       };
       interval = mkOption {
